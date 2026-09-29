@@ -342,6 +342,24 @@ function confetti(){
 }
 
 
+// ── Закрытые разделы: бот передаёт ?locked=photo:28.12.2026,desc:… (1 попытка раз в 3 месяца) ──
+const LOCKED = {};
+try {
+  (new URLSearchParams(location.search).get('locked') || '').split(',').forEach(p => {
+    const [m, d] = p.split(':'); if (m) LOCKED[m] = d || '';
+  });
+} catch(e){}
+document.querySelectorAll('.mode').forEach(el => {
+  const m = ((el.getAttribute('onclick') || '').match(/start\('(\w+)'\)/) || [])[1];
+  if (!m || !(m in LOCKED)) return;
+  el.removeAttribute('onclick');
+  el.style.opacity = '.45'; el.style.cursor = 'not-allowed';
+  el.insertAdjacentHTML('beforeend',
+    '<p style="margin-top:6px;color:var(--red);font-weight:600">🔒 Уже сыграно — снова с ' + LOCKED[m] + '</p>');
+});
+const _start = start;
+start = function(mode){ if (mode in LOCKED) return; _start(mode); };
+
 // ── Telegram Web App интеграция (Stardogs bot) ──
 const TG = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
 try { if (TG) { TG.ready(); TG.expand(); } } catch(e){}
