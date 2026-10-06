@@ -146,7 +146,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-s
       <h2 id="resTitle">Готово!</h2>
       <p id="resMsg"></p>
       <button class="btn btn-primary btn-lg" id="sendResult" style="display:none;margin-bottom:10px">📤 Отправить результат в бота</button>
-      <button class="btn btn-primary btn-lg" onclick="location.reload()">Играть ещё раз</button>
+      <button class="btn btn-primary btn-lg" id="playAgain" onclick="location.reload()">Играть ещё раз</button>
     </div>
   </div>
 </div>
@@ -364,24 +364,100 @@ start = function(mode){ if (mode in LOCKED) return; _start(mode); };
 const TG = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
 try { if (TG) { TG.ready(); TG.expand(); } } catch(e){}
 function inTelegram(){ return !!(TG && TG.platform && TG.platform !== 'unknown'); }
+function tgSend(mode, correct, total, label){
+  const payload = JSON.stringify({
+    v: 1,
+    mode: mode,
+    mode_label: label || (MODE_LABEL[mode] || mode),
+    total: total,
+    correct: correct,
+    errors: total - correct,
+    pct: total ? Math.round(correct / total * 100) : 0
+  });
+  // сперва стираем отметку «попытка идёт», потом отправляем (sendData закрывает игру)
+  attDel(mode, () => { try { TG.sendData(payload); } catch(e){ /* закроется само */ } });
+}
+
+// Результат уходит в бот САМ (06.10.2026): нельзя не отправить плохой и переиграть
 function tgOffer(correct, total, pct, mode){
   if(!inTelegram()) return;                 // открыто вне Telegram — кнопки нет
   const btn = document.getElementById('sendResult');
+  const again = document.getElementById('playAgain');
+  if(again) again.style.display = 'none';
   if(!btn) return;
-  btn.style.display = '';
-  btn.onclick = () => {
-    const payload = JSON.stringify({
-      v: 1,
-      mode: mode,
-      mode_label: (MODE_LABEL[mode] || mode),
-      total: total,
-      correct: correct,
-      errors: total - correct,
-      pct: Math.round(pct * 100)
-    });
-    try { TG.sendData(payload); } catch(e){ /* закроется само */ }
-  };
+  let sent = false, left = 4;
+  const go = () => { if(sent) return; sent = true; clearInterval(t);
+    btn.textContent = '📤 Отправляем…'; tgSend(mode, correct, total); };
+  const tick = () => { btn.textContent = '📤 Результат уйдёт в бота через ' + left + '…'; };
+  btn.style.display = ''; tick();
+  btn.onclick = go;
+  const t = setInterval(() => { left--; if(left <= 0) go(); else tick(); }, 1000);
 }
+
+// ── Брошенная попытка тоже засчитывается (06.10.2026) ──
+// Начатый раздел отмечаем в Telegram CloudStorage (привязан к человеку, виден с любого телефона)
+// + localStorage про запас. Закрыл игру посреди раздела → при следующем входе раздел нельзя
+// начать заново: можно только отправить набранное (неотвеченные вопросы = ошибки).
+const ATT = 'att_';
+const CS = (TG && TG.CloudStorage && TG.isVersionAtLeast && TG.isVersionAtLeast('6.9')) ? TG.CloudStorage : null;
+const ATT_TTL = 90 * 864e5;
+function attSet(mode, v){
+  const k = ATT + mode, s = JSON.stringify(v);
+  try { localStorage.setItem(k, s); } catch(e){}
+  try { if(CS) CS.setItem(k, s, () => {}); } catch(e){}
+}
+function attDel(mode, cb){
+  const k = ATT + mode; let done = false;
+  const fin = () => { if(!done){ done = true; cb && cb(); } };
+  try { localStorage.removeItem(k); } catch(e){}
+  try { if(CS){ CS.removeItem(k, fin); setTimeout(fin, 1500); return; } } catch(e){}
+  fin();
+}
+function attLoad(cb){
+  const res = {};
+  const put = (k, s) => { try { const v = JSON.parse(s); if(v && v.t) res[k.slice(ATT.length)] = v; } catch(e){} };
+  try { for(let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); if(k && k.indexOf(ATT) === 0) put(k, localStorage.getItem(k)); } } catch(e){}
+  if(!CS) return cb(res);
+  let done = false; const fin = () => { if(!done){ done = true; cb(res); } };
+  setTimeout(fin, 2500);
+  try {
+    CS.getKeys((err, keys) => {
+      keys = (keys || []).filter(k => k.indexOf(ATT) === 0);
+      if(err || !keys.length) return fin();
+      CS.getItems(keys, (e2, vals) => { if(vals) keys.forEach(k => vals[k] && put(k, vals[k])); fin(); });
+    });
+  } catch(e){ fin(); }
+}
+
+const PENDING = {};
+if(inTelegram()){
+  attLoad(found => {
+    Object.keys(found).forEach(m => {
+      const v = found[m];
+      if(m in LOCKED || !MODE_LABEL[m] || Date.now() - v.t > ATT_TTL){ attDel(m); return; }
+      PENDING[m] = v;
+      const el = [...document.querySelectorAll('.mode')].find(x => (x.getAttribute('onclick') || '').indexOf("'" + m + "'") >= 0);
+      if(el) el.insertAdjacentHTML('beforeend',
+        '<p style="margin-top:6px;color:var(--red);font-weight:600">⏸ Попытка прервана: верно ' + (v.c || 0) + ' из ' + v.n +
+        '. Нажми — результат уйдёт в бота</p>');
+    });
+  });
+}
+
+const _start2 = start;
+start = function(mode){
+  if(mode in PENDING){ const v = PENDING[mode];
+    tgSend(mode, v.c || 0, v.n, (MODE_LABEL[mode] || mode) + ' (прервано)'); return; }
+  if(mode in LOCKED) return;
+  _start2(mode);
+  if(inTelegram()) attSet(mode, {t: Date.now(), c: 0, i: 0, n: state.order.length});
+};
+const _answer = answer;
+answer = function(chosen, btn){
+  const was = state.answered;
+  _answer(chosen, btn);
+  if(!was && inTelegram()) attSet(state.mode, {t: Date.now(), c: state.correct, i: state.i + 1, n: state.order.length});
+};
 
 </script>
 </body></html>
